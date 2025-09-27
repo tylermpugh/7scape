@@ -1,42 +1,62 @@
 const express = require("express");
 const bodyParser = require("body-parser");
+const path = require("path");
 const db = require("./db");
+
 const app = express();
 app.use(bodyParser.json());
 
-// signup
+// serve static site
+app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public/index.html"));
+});
+
+// ---- helpers ----
+const URL_REGEX = /((https?:\/\/)|(\bwww\.)|([a-z0-9-]+\.[a-z]{2,})(\/|\b))/i;
+function rejectLinks(text) {
+  // catches obvious links and most obfuscations like "dot com"
+  if (URL_REGEX.test(text)) return true;
+  const obf = /([a-z0-9-]+)\s*(\[|\(|\{)?\s*(dot|\.|d0t)\s*(\]|\)|\})?\s*[a-z]{2,}/i;
+  return obf.test(text);
+}
+
+// ---- routes ----
+
+// signup (super simple)
 app.post("/signup", (req, res) => {
-  const { username, email } = req.body;
-  db.run(
-    "INSERT INTO users (username, email) VALUES (?, ?)",
-    [username, email],
-    function (err) {
-      if (err) return res.status(400).json({ error: err.message });
-      res.json({ id: this.lastID, username, email });
-    }
-  );
+  const { username, email } = req.body || {};
+  if (!username || !email) return res.status(400).json({ error: "username and email required" });
+  if (username.length > 18) return res.status(400).json({ error: "username too long" });
+
+  const stmt = db.prepare("INSERT INTO users (username, email) VALUES (?, ?)");
+  stmt.run([username.trim(), email.trim()], function (err) {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ id: this.lastID, username, email });
+  });
 });
 
-// post text
+// create post (500 chars, text-only, no links)
 app.post("/post", (req, res) => {
-  const { user_id, content } = req.body;
-  if (content.length > 500) return res.status(400).json({ error: "Too long" });
-  db.run(
-    "INSERT INTO posts (user_id, content) VALUES (?, ?)",
-    [user_id, content],
-    function (err) {
-      if (err) return res.status(400).json({ error: err.message });
-      res.json({ id: this.lastID, content });
-    }
-  );
+  const { user_id, content } = req.body || {};
+  if (!user_id || !content) return res.status(400).json({ error: "user_id and content required" });
+  const trimmed = String(content).trim();
+  if (trimmed.length === 0 || trimmed.length > 500) return res.status(400).json({ error: "content must be 1–500 chars" });
+  if (rejectLinks(trimmed)) return res.status(400).json({ error: "no links allowed" });
+
+  const stmt = db.prepare("INSERT INTO posts (user_id, content) VALUES (?, ?)");
+  stmt.run([user_id, trimmed], function (err) {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ id: this.lastID, content: trimmed });
+  });
 });
 
-// global feed
-app.get("/feed/global", (req, res) => {
+// global feed (chronological, latest 100)
+app.get("/feed/global", (_req, res) => {
   db.all(
     `SELECT posts.id, users.username, posts.content, posts.created_at
      FROM posts
-     JOIN users ON posts.user_id = users.id
+     JOIN users ON users.id = posts.user_id
      ORDER BY posts.created_at DESC
      LIMIT 100`,
     [],
@@ -47,32 +67,50 @@ app.get("/feed/global", (req, res) => {
   );
 });
 
-// follow
+// follow / unfollow
 app.post("/follow", (req, res) => {
-  const { follower_id, following_id } = req.body;
-  db.run(
-    "INSERT INTO follows (follower_id, following_id) VALUES (?, ?)",
-    [follower_id, following_id],
-    function (err) {
-      if (err) return res.status(400).json({ error: err.message });
-      res.json({ success: true });
-    }
-  );
+  const { follower_id, following_id } = req.body || {};
+  if (!follower_id || !following_id) return res.status(400).json({ error: "follower_id and following_id required" });
+  const stmt = db.prepare("INSERT INTO follows (follower_id, following_id) VALUES (?, ?)");
+  stmt.run([follower_id, following_id], (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ success: true });
+  });
 });
 
-// home feed (followed only)
+app.post("/unfollow", (req, res) => {
+  const { follower_id, following_id } = req.body || {};
+  if (!follower_id || !following_id) return res.status(400).json({ error: "follower_id and following_id required" });
+  const stmt = db.prepare("DELETE FROM follows WHERE follower_id = ? AND following_id = ?");
+  stmt.run([follower_id, following_id], (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ success: true });
+  });
+});
+
+// block
+app.post("/block", (req, res) => {
+  const { blocker_id, blocked_id } = req.body || {};
+  if (!blocker_id || !blocked_id) return res.status(400).json({ error: "blocker_id and blocked_id required" });
+  const stmt = db.prepare("INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)");
+  stmt.run([blocker_id, blocked_id], (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ success: true });
+  });
+});
+
+// home feed (followed only, excluding blocked)
 app.get("/feed/home/:user_id", (req, res) => {
   const { user_id } = req.params;
   db.all(
-    `SELECT posts.id, users.username, posts.content, posts.created_at
-     FROM posts
-     JOIN users ON posts.user_id = users.id
-     WHERE posts.user_id IN (
-       SELECT following_id FROM follows WHERE follower_id = ?
-     )
-     ORDER BY posts.created_at DESC
+    `SELECT p.id, u.username, p.content, p.created_at
+     FROM posts p
+     JOIN users u ON u.id = p.user_id
+     WHERE p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+       AND p.user_id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
+     ORDER BY p.created_at DESC
      LIMIT 100`,
-    [user_id],
+    [user_id, user_id],
     (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows);
@@ -80,17 +118,5 @@ app.get("/feed/home/:user_id", (req, res) => {
   );
 });
 
-// block
-app.post("/block", (req, res) => {
-  const { blocker_id, blocked_id } = req.body;
-  db.run(
-    "INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)",
-    [blocker_id, blocked_id],
-    function (err) {
-      if (err) return res.status(400).json({ error: err.message });
-      res.json({ success: true });
-    }
-  );
-});
-
-app.listen(3000, () => console.log("7scape running on http://localhost:3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`7scape running on :${PORT}`));

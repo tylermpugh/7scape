@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>7scape</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:monospace;max-width:800px;margin:40px auto;padding:0 16px}
+    textarea{width:100%;height:100px}
+    input,button,textarea{font-family:inherit;font-size:14px}
+    .row{margin-bottom:12px}
+    .post{border-top:1px solid #ddd;padding:12px 0}
+    .meta{color:#666;font-size:12px;margin-bottom:6px}
+    .tabs a{margin-right:12px}
+  </style>
+</head>
+<body>
+  <h1>7scape</h1>
+
+  <div class="row">
+    <input id="userId" placeholder="user_id (from /signup)" />
+  </div>
+
+  <div class="row">
+    <textarea id="content" maxlength="500" placeholder="say something (500 chars max). text-only — no links."></textarea>
+    <button id="send">post</button>
+    <span id="msg"></span>
+  </div>
+
+  <div class="tabs">
+    <a href="#" id="tabGlobal">global</a>
+    <a href="#" id="tabHome">home</a>
+  </div>
+
+  <div id="feed"></div>
+
+  <script>
+    const feed = document.getElementById('feed');
+    const msg = document.getElementById('msg');
+
+    function escapeHtml(s){return s.replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+
+    async function loadGlobal(){
+      const r = await fetch('/feed/global'); const rows = await r.json();
+      render(rows);
+    }
+    async function loadHome(){
+      const uid = document.getElementById('userId').value.trim();
+      if(!uid){ msg.textContent='enter your user_id to view home'; return; }
+      const r = await fetch('/feed/home/'+uid); const rows = await r.json();
+      render(rows);
+    }
+    function render(rows){
+      feed.innerHTML = rows.map(r=>`
+        <div class="post">
+          <div class="meta">@${r.username} — ${new Date(r.created_at).toLocaleString()}</div>
+          <div>${escapeHtml(r.content)}</div>
+        </div>
+      `).join('') || '<p>(no posts yet)</p>';
+    }
+
+    document.getElementById('send').onclick = async () => {
+      const user_id = document.getElementById('userId').value.trim();
+      const content = document.getElementById('content').value.trim();
+      if(!user_id || !content){ msg.textContent='need user_id and content'; return; }
+      const res = await fetch('/post',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id,content})});
+      const j = await res.json();
+      msg.textContent = j.error ? j.error : 'posted';
+      if(!j.error){ document.getElementById('content').value=''; loadGlobal(); }
+    };
+
+    document.getElementById('tabGlobal').onclick = (e)=>{e.preventDefault(); loadGlobal();}
+    document.getElementById('tabHome').onclick = (e)=>{e.preventDefault(); loadHome();}
+
+    loadGlobal();
+  </script>
+</body>
+</html>
