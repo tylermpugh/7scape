@@ -15,7 +15,6 @@ app.get("/", (_req, res) => {
 // ---- helpers ----
 const URL_REGEX = /((https?:\/\/)|(\bwww\.)|([a-z0-9-]+\.[a-z]{2,})(\/|\b))/i;
 function rejectLinks(text) {
-  // catches obvious links and most obfuscations like "dot com"
   if (URL_REGEX.test(text)) return true;
   const obf = /([a-z0-9-]+)\s*(\[|\(|\{)?\s*(dot|\.|d0t)\s*(\]|\)|\})?\s*[a-z]{2,}/i;
   return obf.test(text);
@@ -23,16 +22,24 @@ function rejectLinks(text) {
 
 // ---- routes ----
 
-// signup (super simple)
+// signup: create-or-return existing user (no separate login needed)
 app.post("/signup", (req, res) => {
   const { username, email } = req.body || {};
   if (!username || !email) return res.status(400).json({ error: "username and email required" });
   if (username.length > 18) return res.status(400).json({ error: "username too long" });
 
-  const stmt = db.prepare("INSERT INTO users (username, email) VALUES (?, ?)");
-  stmt.run([username.trim(), email.trim()], function (err) {
-    if (err) return res.status(400).json({ error: err.message });
-    res.json({ id: this.lastID, username, email });
+  const u = username.trim(), e = email.trim();
+  // check if user exists by username OR email
+  db.get("SELECT id, username, email FROM users WHERE username = ? OR email = ? LIMIT 1", [u, e], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (row) return res.json(row); // return existing user
+
+    // create new
+    const stmt = db.prepare("INSERT INTO users (username, email) VALUES (?, ?)");
+    stmt.run([u, e], function (err2) {
+      if (err2) return res.status(400).json({ error: err2.message });
+      res.json({ id: this.lastID, username: u, email: e });
+    });
   });
 });
 
@@ -51,7 +58,7 @@ app.post("/post", (req, res) => {
   });
 });
 
-// global feed (chronological, latest 100)
+// global feed
 app.get("/feed/global", (_req, res) => {
   db.all(
     `SELECT posts.id, users.username, posts.content, posts.created_at
